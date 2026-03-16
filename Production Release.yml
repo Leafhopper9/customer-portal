@@ -1,0 +1,121 @@
+# 工作流名称：清晰标识用途和触发方式
+name: Master Branch Manual CI/CD
+
+# 触发规则：仅允许在master分支手动触发，支持自定义参数
+on:
+  workflow_dispatch:
+    branches: [master]  # 严格限定仅master分支可手动触发
+    inputs:
+      # 自定义参数1：部署环境（必填，默认test）
+      deploy_env:
+        description: '部署目标环境（可选：test/uat/prod）'
+        type: choice  # 下拉选择框，避免手动输入错误
+        options:
+          - test
+          - uat
+          - prod
+        required: true
+        default: 'test'
+      # 自定义参数2：构建版本号（选填）
+      build_version:
+        description: '本次构建的版本号（如 v1.0.0，留空则自动生成）'
+        required: false
+
+# 全局环境变量：所有Job都可使用
+env:
+  NODE_VERSION: '20'          # 统一管理Node版本
+  BUILD_OUTPUT_DIR: './dist' # 构建产物目录
+
+# 权限配置：按需授权（最小权限原则）
+permissions:
+  contents: read  # 读取仓库代码
+  actions: read   # 读取Action日志
+
+jobs:
+  # 第一个Job：代码校验与测试
+  validate-and-test:
+    name: 代码校验 & 运行测试
+    runs-on: ubuntu-latest  # 运行环境：最新Ubuntu
+    steps:
+      # 步骤1：拉取master分支代码（官方Action，稳定可靠）
+      - name: 拉取仓库代码
+        uses: actions/checkout@v5
+        with:
+          ref: master  # 强制拉取master分支代码
+
+      # 步骤2：配置Node.js环境
+      - name: 配置Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'  # 缓存npm依赖，加速后续运行
+
+      # 步骤3：安装项目依赖（npm ci比npm install更严格，适合CI环境）
+      - name: 安装项目依赖
+        run: npm ci
+        # 捕获依赖安装失败，方便排查
+        continue-on-error: false
+
+      # 步骤4：运行代码检查（如ESLint）
+      - name: 运行代码格式检查
+        run: npm run lint || echo "代码格式检查警告，继续执行（可根据需求改为exit 1强制终止）"
+
+      # 步骤5：运行单元测试
+      - name: 运行单元测试
+        run: npm test
+
+  # 第二个Job：构建打包（依赖第一个Job完成）
+  build-package:
+    name: 构建打包
+    runs-on: ubuntu-latest
+    needs: validate-and-test  # 仅当validate-and-test成功后才运行
+    steps:
+      - name: 拉取仓库代码
+        uses: actions/checkout@v5
+        with:
+          ref: master
+
+      - name: 配置Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 构建项目（根据环境区分配置）
+        run: |
+          # 打印当前构建信息，方便日志排查
+          echo "当前构建环境：${{ github.event.inputs.deploy_env }}"
+          echo "构建版本号：${{ github.event.inputs.build_version || 'auto-'$(date +%Y%m%d%H%M%S) }}"
+          # 执行构建命令（根据你的项目调整，如vue/react的build命令）
+          npm run build -- --mode ${{ github.event.inputs.deploy_env }}
+
+      # 步骤6：上传构建产物（方便后续部署或下载）
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: master-build-${{ github.event.inputs.deploy_env }}-${{ github.event.inputs.build_version || 'latest' }}
+          path: ${{ env.BUILD_OUTPUT_DIR }}
+          retention-days: 7  # 产物保留7天，避免占用空间
+
+  # 可选：第三个Job：部署（示例，根据你的部署方式调整）
+  deploy:
+    name: 部署到${{ github.event.inputs.deploy_env }}环境
+    runs-on: ubuntu-latest
+    needs: build-package
+    if: github.event.inputs.deploy_env != 'prod'  # 示例：prod环境需额外确认，暂不自动部署
+    steps:
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          name: master-build-${{ github.event.inputs.deploy_env }}-${{ github.event.inputs.build_version || 'latest' }}
+          path: ${{ env.BUILD_OUTPUT_DIR }}
+
+      - name: 模拟部署（替换为你的真实部署命令）
+        run: |
+          echo "开始部署到${{ github.event.inputs.deploy_env }}环境..."
+          # 示例：部署到服务器/云平台的命令，如scp、rsync、云厂商CLI等
+          # scp -r ${{ env.BUILD_OUTPUT_DIR }} user@server:/var/www/html/
+          echo "部署完成（仅模拟，需替换为真实命令）"
